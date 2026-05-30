@@ -25,8 +25,8 @@ namespace Jellyfin.Plugin.NextUpMerge.Api;
 
 public class ResumeInterceptMiddleware
 {
-    private static readonly Regex _resumePattern =
-        new(@"^/Users/([0-9a-fA-F\-]{32,36})/Items/Resume$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex _userItemsResumePattern =
+        new(@"^/UserItems/Resume$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly ItemFields[] _clientFields =
     {
@@ -51,26 +51,35 @@ public class ResumeInterceptMiddleware
             return;
         }
 
-        var match = _resumePattern.Match(context.Request.Path.Value ?? string.Empty);
-        if (!match.Success || !Guid.TryParse(match.Groups[1].Value, out var userId))
+        var path = context.Request.Path.Value ?? string.Empty;
+        Guid userId;
+
+        if (_userItemsResumePattern.IsMatch(path) &&
+            Guid.TryParse(context.Request.Query["userId"].ToString(), out userId))
+        {
+            var mediaTypes = context.Request.Query["mediaTypes"].ToString();
+            if (!string.IsNullOrEmpty(mediaTypes) &&
+                !mediaTypes.Split(',').Any(t => t.Trim().Equals("Video", StringComparison.OrdinalIgnoreCase)))
+            {
+                await _next(context);
+                return;
+            }
+        }
+        else
         {
             await _next(context);
             return;
         }
 
-        // Only intercept video resume requests; pass through Audio, Book, etc.
-        var mediaTypes = context.Request.Query["mediaTypes"].ToString();
-        if (!string.IsNullOrEmpty(mediaTypes) &&
-            !mediaTypes.Split(',').Any(t => t.Trim().Equals("Video", StringComparison.OrdinalIgnoreCase)))
-        {
-            await _next(context);
-            return;
-        }
+        await HandleMergedAsync(context, userId);
+    }
 
-        var userManager  = context.RequestServices.GetRequiredService<IUserManager>();
-        var libraryMgr   = context.RequestServices.GetRequiredService<ILibraryManager>();
-        var tvMgr        = context.RequestServices.GetRequiredService<ITVSeriesManager>();
-        var dtoService   = context.RequestServices.GetRequiredService<IDtoService>();
+    private async Task HandleMergedAsync(HttpContext context, Guid userId)
+    {
+        var userManager = context.RequestServices.GetRequiredService<IUserManager>();
+        var libraryMgr  = context.RequestServices.GetRequiredService<ILibraryManager>();
+        var tvMgr       = context.RequestServices.GetRequiredService<ITVSeriesManager>();
+        var dtoService  = context.RequestServices.GetRequiredService<IDtoService>();
 
         var user = userManager.GetUserById(userId);
         if (user is null)
@@ -83,7 +92,7 @@ public class ResumeInterceptMiddleware
 
         var startIndex       = TryGetInt(qs, "startIndex");
         var limit            = TryGetInt(qs, "limit");
-        var fields           = qs.TryGetValue("fields", out var fv)   ? fv.ToString() : null;
+        var fields           = qs.TryGetValue("fields", out var fv)  ? fv.ToString() : null;
         var enableImages     = TryGetBool(qs, "enableImages");
         var imgTypeLimit     = TryGetInt(qs, "imageTypeLimit");
         var imgTypes         = qs.TryGetValue("enableImageTypes", out var itv) ? itv.ToString() : null;
@@ -142,8 +151,8 @@ public class ResumeInterceptMiddleware
         }
 
         _logger.LogDebug(
-            "[NextUpMerge] Merged resume: {CW} continue-watching + {NU} next-up = {Total} total",
-            cwItems.Count, nuItems.Count, merged.Count);
+            "[NextUpMerge] {Path}: {CW} continue-watching + {NU} next-up = {Total} total",
+            context.Request.Path, cwItems.Count, nuItems.Count, merged.Count);
 
         // 4. Page
         var start = startIndex ?? 0;
@@ -153,6 +162,7 @@ public class ResumeInterceptMiddleware
 
         // 5. Convert to DTOs and return
         var dtos = dtoService.GetBaseItemDtos(paged.ToList(), dtoOptions, user);
+
         var result = new QueryResult<BaseItemDto>
         {
             Items            = dtos,
@@ -160,7 +170,6 @@ public class ResumeInterceptMiddleware
             StartIndex       = start,
         };
 
-        // Use Jellyfin's MVC JSON options for exact same serialization as built-in controllers
         var serializerOptions = context.RequestServices
             .GetService<IOptions<JsonOptions>>()?.Value.JsonSerializerOptions
             ?? JsonDefaults.CamelCaseOptions;
@@ -187,7 +196,6 @@ public class ResumeInterceptMiddleware
             EnableUserData = enableUserData ?? true,
         };
 
-        // Always include the fields that Jellyfin's built-in endpoint adds via AddClientFields()
         var fieldList = new List<ItemFields>(_clientFields);
 
         if (!string.IsNullOrEmpty(fields))

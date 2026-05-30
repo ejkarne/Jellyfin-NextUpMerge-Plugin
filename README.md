@@ -1,129 +1,51 @@
-# Jellyfin.Plugin.NextUpMerge
+# Jellyfin NextUpMerge Plugin
 
-A Jellyfin plugin that merges **Continue Watching** and **Next Up** into a single
-resumable list — so Infuse (and any other client) shows next episodes alongside
-in-progress ones in the top "Watching" shelf.
+A Jellyfin plugin that merges **Continue Watching** and **Next Up** into a single list.
 
-No proxy, no extra containers. The plugin runs inside Jellyfin itself.
 
----
+## About this plugin
 
-## How it works
+There's a reported issue on Infuse where the _Watching_ shelf will show TV Shows next episodes when using Plex, but not when using Jellyfin as a share. That happens because Plex returns a combined list of in-progress and next-up items from its API, while Jellyfin keeps them separate.
 
-Jellyfin exposes `/Users/{userId}/Items/Resume` for the Continue Watching list.
-This plugin registers its own controller on that same route (with higher priority
-than the built-in one) and returns a merged, deduplicated list:
+This plugin creates a middleware on Jellyfin that merges the _Continue Watching_ and _Next Up_ when requesting the _Continue Watching_ endpoint, so Infuse in progress an next episodes in its top shelf.
 
-```
-Continue Watching  (in-progress episodes)
-       +
-Next Up            (next unwatched episodes per series)
-       ↓
-  deduplicated by series  →  returned as one list
-```
+### More on the issue
 
-If a series already has an in-progress episode in Continue Watching, its Next Up
-entry is skipped so you never see the same show twice.
+This has been a known issue and requested feature on Firecore community:
 
----
+- [Firecore Community - Jellyfin Merge Continue Watching and Up Next](https://community.firecore.com/t/jellyfin-merge-continue-watching-and-up-next/39898)
+- [Firecore Community - Infuse, PMS and Jellyfin: “continue watching” only for PMS?](https://community.firecore.com/t/infuse-pms-and-jellyfin-continue-watching-only-for-pms/59923)
 
-## Requirements
+As this new feature is not yet implemented on Jellyfin or Infuse, this plugin is a **temporary workaround** to get the same experience as on Plex. As it is a PoC, Claude was used help develop it.
 
-- **Jellyfin 10.10.x**
-- **.NET 8 SDK** to build (only needed on your build machine, not the server)
 
----
 
-## Build
+## How to use this plugin
 
-```bash
-# 1. Install .NET 8 SDK if you don't have it:
-#    https://dotnet.microsoft.com/download/dotnet/8.0
+### Compatibility
 
-# 2. Build
-chmod +x build.sh
+- **Jellyfin 10.11.x**
+
+### Build `.dll` files
+
+To build this plugin, you need [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) installed. The `build.sh` script will compile the plugin files into `dist/` folder.
+
+```sh
+# Install .NET 9 SDK
+## macOS (Homebrew):
+brew install --cask dotnet-sdk9
+
+# Build plugin .dll files
 ./build.sh
-
-# Output: dist/Jellyfin.Plugin.NextUpMerge.dll
 ```
 
----
+### Add plugin to Jellyfin
 
-## Install
+Currently, this plugin files must be copied mannually to the Jellyfin plugins folder.
 
-### Find your Jellyfin config/plugins folder
+On you Jellyfin config directory, create a new folder `NextUpMerge_1.0.0.0` and copy the content of `dist/` into it.
 
-**Docker (volume mount):**
-```bash
-docker inspect jellyfin | grep -A2 Mounts
-# Look for the mount pointing to /config inside the container
-# e.g.  /srv/jellyfin/config  →  /config
-```
+In the end, for it to work, there must be a `.dll` file as in:
+`plugins/NextUpMerge_1.0.0.0/Jellyfin.Plugin.NextUpMerge.dll`.
 
-**Inside the container:**
-```
-/config/plugins/
-```
-
-### Copy the plugin
-
-Create a versioned subfolder (Jellyfin requires this naming):
-```bash
-mkdir -p /your/jellyfin/config/plugins/NextUpMerge_1.0.0.0
-cp dist/Jellyfin.Plugin.NextUpMerge.dll \
-   /your/jellyfin/config/plugins/NextUpMerge_1.0.0.0/
-```
-
-Or copy directly into the container:
-```bash
-docker cp dist/Jellyfin.Plugin.NextUpMerge.dll \
-    jellyfin:/config/plugins/NextUpMerge_1.0.0.0/Jellyfin.Plugin.NextUpMerge.dll
-```
-
-### Restart Jellyfin
-```bash
-docker restart jellyfin
-```
-
-### Verify
-
-Check the Jellyfin logs for:
-```
-[NextUpMerge] Merged resume: X continue-watching + Y next-up = Z total
-```
-
-Or call the endpoint directly:
-```bash
-curl "http://localhost:8096/Users/{YOUR_USER_ID}/Items/Resume?api_key={YOUR_API_KEY}"
-# Items array should now include both in-progress and next-up episodes
-```
-
----
-
-## Infuse setup
-
-Nothing changes in Infuse — keep pointing it at your Jellyfin URL as normal.
-The merged list is returned transparently from the same endpoint Infuse already calls.
-
----
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| Plugin not loading | Folder name must be `NextUpMerge_1.0.0.0` (exact) |
-| No change in Infuse | Restart Jellyfin; check logs for `[NextUpMerge]` |
-| Duplicate shows | Both CW and NU returned — check dedup logic in logs |
-| Build errors | Make sure you have .NET 8 SDK, not just runtime |
-
----
-
-## Configuration (optional)
-
-Default limits: 20 Continue Watching + 20 Next Up items.
-To change, edit `src/Configuration/PluginConfiguration.cs` before building:
-
-```csharp
-public int ContinueWatchingLimit { get; set; } = 20;
-public int NextUpLimit           { get; set; } = 20;
-```
+Jellyfin must be restarted after copying the plugin files for it to be loaded.

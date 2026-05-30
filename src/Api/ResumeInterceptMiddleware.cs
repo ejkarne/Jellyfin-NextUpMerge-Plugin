@@ -58,6 +58,15 @@ public class ResumeInterceptMiddleware
             return;
         }
 
+        // Only intercept video resume requests; pass through Audio, Book, etc.
+        var mediaTypes = context.Request.Query["mediaTypes"].ToString();
+        if (!string.IsNullOrEmpty(mediaTypes) &&
+            !mediaTypes.Split(',').Any(t => t.Trim().Equals("Video", StringComparison.OrdinalIgnoreCase)))
+        {
+            await _next(context);
+            return;
+        }
+
         var userManager  = context.RequestServices.GetRequiredService<IUserManager>();
         var libraryMgr   = context.RequestServices.GetRequiredService<ILibraryManager>();
         var tvMgr        = context.RequestServices.GetRequiredService<ITVSeriesManager>();

@@ -80,6 +80,7 @@ public class ResumeInterceptMiddleware
         var libraryMgr  = context.RequestServices.GetRequiredService<ILibraryManager>();
         var tvMgr       = context.RequestServices.GetRequiredService<ITVSeriesManager>();
         var dtoService  = context.RequestServices.GetRequiredService<IDtoService>();
+        var userDataMgr = context.RequestServices.GetRequiredService<IUserDataManager>();
 
         var user = userManager.GetUserById(userId);
         if (user is null)
@@ -151,6 +152,36 @@ public class ResumeInterceptMiddleware
             if (item is Episode ep2 && ep2.SeriesId != Guid.Empty)
                 seenSeries.Add(ep2.SeriesId);
         }
+
+        // Sort the merged list chronologically by the most recent viewing activity
+        DateTime GetLastActivityDate(BaseItem item)
+        {
+            // Pass the actual 'user' and 'item' objects, not their Guids
+            var itemData = userDataMgr.GetUserData(user, item);
+            if (itemData != null && itemData.LastPlayedDate.HasValue)
+            {
+                return itemData.LastPlayedDate.Value;
+            }
+
+            if (item is Episode ep && ep.SeriesId != Guid.Empty)
+            {
+                // Fetch the actual Series BaseItem object using its ID
+                var series = libraryMgr.GetItemById(ep.SeriesId);
+                if (series != null)
+                {
+                    // Pass the user and the series object
+                    var seriesData = userDataMgr.GetUserData(user, series);
+                    if (seriesData != null && seriesData.LastPlayedDate.HasValue)
+                    {
+                        return seriesData.LastPlayedDate.Value;
+                    }
+                }
+            }
+
+            return item.DateCreated;
+        }
+
+        merged = merged.OrderByDescending(GetLastActivityDate).ToList();
 
         _logger.LogDebug(
             "[NextUpMerge] {Path}: {CW} continue-watching + {NU} next-up = {Total} total",

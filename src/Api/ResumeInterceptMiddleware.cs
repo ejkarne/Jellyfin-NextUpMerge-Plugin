@@ -109,12 +109,14 @@ public class ResumeInterceptMiddleware
         // 1. Continue Watching
         var cwQuery = new InternalItemsQuery(user)
         {
-            OrderBy    = new[] { (ItemSortBy.DatePlayed, SortOrder.Descending) },
-            IsResumable = true,
-            StartIndex = 0,
-            Limit      = cwLimit,
-            Recursive  = true,
-            DtoOptions = dtoOptions,
+            OrderBy             = new[] { (ItemSortBy.DatePlayed, SortOrder.Descending) },
+            IsResumable         = true,
+            IsVirtualItem       = false,
+            CollapseBoxSetItems = false,
+            StartIndex          = 0,
+            Limit               = cwLimit,
+            Recursive           = true,
+            DtoOptions          = dtoOptions,
         };
         var cwItems = libraryMgr.GetItemsResult(cwQuery).Items.ToList();
 
@@ -150,59 +152,85 @@ public class ResumeInterceptMiddleware
             seenItems.Add(item.Id);
             nuIds.Add(item.Id);
             if (item is Episode ep2 && ep2.SeriesId != Guid.Empty)
+            {
                 seenSeries.Add(ep2.SeriesId);
+            }
         }
 
-        // Sort the merged list chronologically by the most recent viewing activity
-        DateTime GetLastActivityDate(BaseItem item)
+        // 4. Calculate proper chronological activity dates for sorting and serialization
+        var activityDates = new Dictionary<Guid, DateTime>();
+
+        foreach (var item in merged)
         {
-            // Pass the actual 'user' and 'item' objects, not their Guids
+            DateTime maxDate = DateTime.MinValue;
+
             var itemData = userDataMgr.GetUserData(user, item);
             if (itemData != null && itemData.LastPlayedDate.HasValue)
             {
-                return itemData.LastPlayedDate.Value;
+                maxDate = itemData.LastPlayedDate.Value;
             }
 
-            if (item is Episode ep && ep.SeriesId != Guid.Empty)
+            // Unplayed Next Up episodes inherit the true historical date of their most recent predecessor
+            if (maxDate == DateTime.MinValue && item is Episode ep && ep.SeriesId != Guid.Empty)
             {
-                // Fetch the actual Series BaseItem object using its ID
-                var series = libraryMgr.GetItemById(ep.SeriesId);
-                if (series != null)
+                var prevQuery = new InternalItemsQuery(user)
                 {
-                    // Pass the user and the series object
-                    var seriesData = userDataMgr.GetUserData(user, series);
-                    if (seriesData != null && seriesData.LastPlayedDate.HasValue)
+                    AncestorIds = new[] { ep.SeriesId },
+                    IsPlayed    = true,
+                    OrderBy     = new[] { (ItemSortBy.DatePlayed, SortOrder.Descending) },
+                    Limit       = 1,
+                    Recursive   = true
+                };
+                
+                var prevEp = libraryMgr.GetItemsResult(prevQuery).Items.FirstOrDefault();
+                if (prevEp != null)
+                {
+                    var prevData = userDataMgr.GetUserData(user, prevEp);
+                    if (prevData != null && prevData.LastPlayedDate.HasValue)
                     {
-                        return seriesData.LastPlayedDate.Value;
+                        maxDate = prevData.LastPlayedDate.Value;
                     }
                 }
             }
 
-            return item.DateCreated;
+            // Fallback for completely unwatched series
+            if (maxDate == DateTime.MinValue)
+            {
+                maxDate = item.DateCreated;
+            }
+
+            activityDates[item.Id] = maxDate;
         }
 
-        merged = merged.OrderByDescending(GetLastActivityDate).ToList();
+        // Apply sorted dictionary
+        merged = merged.OrderByDescending(x => activityDates[x.Id]).ToList();
 
         _logger.LogDebug(
             "[NextUpMerge] {Path}: {CW} continue-watching + {NU} next-up = {Total} total",
             context.Request.Path, cwItems.Count, nuItems.Count, merged.Count);
 
-        // 4. Page
+        // 5. Page
         var start = startIndex ?? 0;
         IEnumerable<BaseItem> paged = merged.Skip(start);
         if (limit.HasValue)
             paged = paged.Take(limit.Value);
 
-        // 5. Convert to DTOs and return
+        // 6. Convert to DTOs and return
         var dtos = dtoService.GetBaseItemDtos(paged.ToList(), dtoOptions, user);
 
-        // Clear any residual progress on Next Up items so clients don't show a fake progress bar.
         foreach (var dto in dtos)
         {
             if (nuIds.Contains(dto.Id) && dto.UserData is not null)
             {
+                // Clear residual progress so clients don't show a fake progress bar
                 dto.UserData.PlaybackPositionTicks = 0;
                 dto.UserData.PlayedPercentage = null;
+
+                // Surface the inherited activity date so clients interleaving multiple servers sort properly
+                if (activityDates.TryGetValue(dto.Id, out var activityDate) && activityDate != DateTime.MinValue)
+                {
+                    dto.UserData.LastPlayedDate = activityDate;
+                }
             }
         }
 
